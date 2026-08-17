@@ -1,3 +1,5 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "ui.h"
 #include <time.h>
 #include <stdio.h>
@@ -6,7 +8,7 @@
 #include <sys/stat.h>
 #include "ui_custom.h"
 #include "esp_heap_caps.h"
-#include "audio_player_c_api.h" // 引入纯 C 的播放器接口
+#include "audio_player_c_api.h"
 
 // ================= 声明中文字体 =================
 LV_FONT_DECLARE(my_font_chinese_24);
@@ -181,11 +183,16 @@ static void set_chinese_font(void) {
         lv_obj_set_style_text_font(ui_Label20, &my_font_chinese_24, 0);
         lv_obj_set_height(ui_Label20, LV_SIZE_CONTENT);
     }
-    // 【新增】设置 ui_Label1 的中文字体
     if (lv_obj_is_valid(ui_Label1)) {
         lv_obj_set_style_text_font(ui_Label1, &my_font_chinese_24, 0);
         lv_obj_set_height(ui_Label1, LV_SIZE_CONTENT);
     }
+}
+
+// ================= 新增：延时安全播放回调 =================
+static void delayed_audio_play_cb(lv_timer_t * timer) {
+    audio_play_c_play();
+    lv_timer_del(timer); // 触发一次后自动销毁定时器
 }
 
 // ================= 时钟定时器 =================
@@ -227,8 +234,13 @@ static void clock_timer_cb(lv_timer_t * timer) {
             }
             
             if(ui_Screen5 != NULL) {
+                if (g_is_on_screen1) {
+                    g_is_on_screen1 = false;
+                    animation_stop(); 
+                }
+                
                 lv_disp_load_scr(ui_Screen5);
-                audio_play_c_play();
+                lv_timer_create(delayed_audio_play_cb, 600, NULL);
             }
         } 
     }
@@ -266,15 +278,15 @@ static void screen2_next_btn_cb(lv_event_t * e) {
 static void screen2_apply_btn_cb(lv_event_t * e) {
     animation_set_active_sequence(current_preview_seq_index);
 
+    // 【修复1】：应用背景时不直接删除，仅解绑，避免野指针崩溃
     if (dynamic_bg_obj) {
-        lv_obj_del(dynamic_bg_obj);
-        dynamic_bg_obj = NULL;
+        lv_img_set_src(dynamic_bg_obj, NULL);
     }
     
     if (dynamic_bg_dsc.data) {
         heap_caps_free((void*)dynamic_bg_dsc.data);
+        dynamic_bg_dsc.data = NULL;
     }
-    dynamic_bg_dsc.data = NULL;
     
     g_is_on_screen1 = true; 
     lv_disp_load_scr(ui_Screen1);
@@ -303,9 +315,11 @@ static void screen3_next_track_cb(lv_event_t * e) {
     }
 }
 
-// 【新增】Screen3 应用按钮回调
 static void screen3_apply_btn_cb(lv_event_t * e) {
-    // 音乐在切换时底层已经记住了选中的曲目，点击应用直接返回闹钟设置界面 (Screen4)
+    audio_play_c_stop();
+    // 【修复3】：强制 UI 挂起 100ms，等待音频任务释放底层资源
+    vTaskDelay(pdMS_TO_TICKS(100)); 
+    
     lv_disp_load_scr(ui_Screen4);
 }
 
@@ -346,6 +360,8 @@ static void screen4_custom_btn_cb(lv_event_t * e) {
         lv_label_set_text(ui_Label17, song_name);
     }
     
+    audio_play_c_play();
+    
     lv_disp_load_scr(ui_Screen3);
 }
 
@@ -384,6 +400,7 @@ static void global_swipe_left_cb(lv_event_t * e) {
 static void screen5_close_btn_cb(lv_event_t * e) {
     audio_play_c_stop();
     current_ringing_alarm_idx = -1;
+    vTaskDelay(pdMS_TO_TICKS(100)); // 【修复3】
     
     lv_disp_load_scr(ui_Screen1);
     if (animation_get_active_sequence() != 0) {
@@ -410,6 +427,8 @@ static void screen5_delete_btn_cb(lv_event_t * e) {
     }
     
     current_ringing_alarm_idx = -1;
+    vTaskDelay(pdMS_TO_TICKS(100)); // 【修复3】
+    
     lv_disp_load_scr(ui_Screen1);
     if (animation_get_active_sequence() != 0) {
         animation_start();
@@ -479,7 +498,6 @@ void ui_custom_logic_init(void) {
     lv_label_set_text(ui_Label14, "应用");
     lv_label_set_text(ui_Label15, "自定义");
     
-    // 【新增】初始化 Label1 文本
     if (lv_obj_is_valid(ui_Label1)) {
         lv_label_set_text(ui_Label1, "应用");
     }
@@ -494,7 +512,6 @@ void ui_custom_logic_init(void) {
     button_set_transparent(ui_Button8);
     button_set_transparent(ui_Button9);
     
-    // 【新增】Button12 透明化
     if (lv_obj_is_valid(ui_Button12)) {
         button_set_transparent(ui_Button12);
     }
@@ -506,7 +523,6 @@ void ui_custom_logic_init(void) {
     lv_obj_add_event_cb(ui_Button3, screen3_prev_track_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(ui_Button4, screen3_next_track_cb, LV_EVENT_CLICKED, NULL);
     
-    // 【新增】绑定 Button12 到应用闹铃的事件
     if (lv_obj_is_valid(ui_Button12)) {
         lv_obj_add_event_cb(ui_Button12, screen3_apply_btn_cb, LV_EVENT_CLICKED, NULL);
     }

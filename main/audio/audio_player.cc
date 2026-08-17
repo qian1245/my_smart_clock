@@ -9,6 +9,8 @@ static const char* TAG = "AudioPlayer";
 // 引用我们在 mp3_decoder.cc 里写的解码函数
 extern void PlayLocalMP3(const char* filepath, volatile bool* stop_flag);
 
+static volatile bool s_play_requested = false;
+
 void AudioPlayer::LoadMusicDirectory(const char* dir_path) {
     playlist_.clear();
     DIR* dir = opendir(dir_path);
@@ -42,25 +44,43 @@ void AudioPlayer::Play() {
         return;
     }
 
-    // 如果当前正在播放，先停止旧任务
+    // 1. 如果当前正在播，先软中断停止它
     Stop();
 
-    stop_flag_ = false;
-    is_playing_ = true;
+    // 防止上一个任务死锁未退出，强行拦截
+    if (is_playing_) {
+        ESP_LOGE(TAG, "致命错误: 上一个音频任务未能正常释放!");
+        return;
+    }
 
-    // 创建一个独立的 FreeRTOS 任务来执行解码，防止阻塞 UI 线程
-    // 注意：解码需要较大的栈空间，这里分配了 8192 字节 (8KB)
-    xTaskCreate(PlayTaskWrapper, "mp3_play_task", 8192, this, 5, &play_task_handle_);
+    // 2. 【核心保障】：栈空间从 8192 提升到 32768 (32KB)
+    if (play_task_handle_ == nullptr) {
+        xTaskCreate(PlayTaskWrapper, "mp3_play_task", 32768, this, 5, &play_task_handle_);
+    }
+
+    // 3. 唤醒常驻任务开始播放
+    stop_flag_ = false;
+    s_play_requested = true;
 }
 
 void AudioPlayer::Stop() {
-    if (is_playing_ && play_task_handle_ != nullptr) {
-        stop_flag_ = true; // 通知解码循环退出
-        // 等待一小会儿让解码器安全关闭文件
-        vTaskDelay(pdMS_TO_TICKS(50)); 
-        play_task_handle_ = nullptr;
+    if (is_playing_) {
+        stop_flag_ = true; // 令解码循环立刻跳出
+        s_play_requested = false;
+        
+        // 【核心保障】：延长等待时间至 1.5秒，必须等硬件和文件系统彻底释放
+        int timeout = 150; 
+        while (is_playing_ && timeout > 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            timeout--;
+        }
+        
+        if (is_playing_) {
+            ESP_LOGE(TAG, "警告: 音频停止超时，后台解码任务可能已卡死！");
+        } else {
+            ESP_LOGI(TAG, "音频任务已安全停止");
+        }
     }
-    is_playing_ = false;
 }
 
 void AudioPlayer::PlayNext() {
